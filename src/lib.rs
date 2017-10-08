@@ -5,6 +5,7 @@ extern crate llvm_sys as llvm;
 use cbpf::opcode::*;
 use llvm::prelude::*;
 use llvm::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
+use llvm::execution_engine::{LLVMExecutionEngineRef, LLVMMCJITCompilerOptions};
 
 use std::ptr;
 use std::mem;
@@ -15,12 +16,16 @@ macro_rules! cstr {
     () => (b"\0".as_ptr() as *const libc::c_char);
 }
 
+type Func = extern "C" fn(*mut i8) -> i32;
+
 pub struct Converter {
     context: LLVMContextRef,
     module: LLVMModuleRef,
     builder: LLVMBuilderRef,
     functions: HashMap<String, LLVMValueRef>,
     values: HashMap<String, LLVMValueRef>,
+    engine: Option<LLVMExecutionEngineRef>,
+    jit_func: Option<Func>,
 }
 
 // it seems IRParse requires null terminated strings
@@ -54,6 +59,8 @@ impl Converter {
 
             let values = HashMap::new();
             let functions = HashMap::new();
+            let engine = None;
+            let jit_func = None;
 
             Converter {
                 context,
@@ -61,6 +68,8 @@ impl Converter {
                 builder,
                 functions,
                 values,
+                engine,
+                jit_func,
             }
         }
     }
@@ -441,17 +450,59 @@ impl Converter {
 
     // optimization
     // based on optimization code of https://bitbucket.org/tari/merthc
+
+    // compile program
+    pub fn jit_compile(&mut self) -> Result<(), String> {
+        unsafe {
+            llvm::execution_engine::LLVMLinkInMCJIT();
+            let mut engine: LLVMExecutionEngineRef = mem::uninitialized();
+            let mut err_msg: *mut i8 = mem::uninitialized();
+            let mut options: LLVMMCJITCompilerOptions = mem::uninitialized();
+            let options_size = mem::size_of::<LLVMMCJITCompilerOptions>();
+            llvm::execution_engine::LLVMInitializeMCJITCompilerOptions(&mut options, options_size);
+            options.OptLevel = 0;
+            let result_code = llvm::execution_engine::LLVMCreateMCJITCompilerForModule(
+                &mut engine,
+                self.module,
+                &mut options,
+                options_size,
+                &mut err_msg,
+            );
+            if result_code != 0 {
+                return Err(
+                    std::ffi::CStr::from_ptr(err_msg)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+
+            let func_addr = llvm::execution_engine::LLVMGetFunctionAddress(engine, cstr!("main"));
+            let func: Func = mem::transmute(func_addr);
+            self.engine = Some(engine);
+            self.jit_func = Some(func);
+            Ok(())
+        }
+    }
+
+    pub unsafe fn run_jit_func(&self, data: &mut [i8]) -> i32 {
+        self.jit_func.expect("compile program first")(data.as_ptr() as *mut i8)
+    }
 }
+
 
 impl Drop for Converter {
     fn drop(&mut self) {
         unsafe {
+            // it gives error... why??
+            // self.engine
+            //     .map(|e| llvm::execution_engine::LLVMDisposeExecutionEngine(e));
             llvm::core::LLVMDisposeBuilder(self.builder);
             llvm::core::LLVMDisposeModule(self.module);
             llvm::core::LLVMContextDispose(self.context);
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -461,7 +512,7 @@ mod tests {
         let mut converter = Converter::new();
         let ir = converter.convert(insns);
         converter.dump_module();
-        r
+        ir
     }
 
     #[test]
@@ -517,5 +568,26 @@ mod tests {
         ];
         let ir = convert(&insns);
         assert!(ir.is_ok());
+    }
+
+    #[test]
+    fn jit_test() {
+        // a = 10; x = 20; x += a; ret x;
+        let insns = [
+            BpfInsn::new(BPF_LD_IMM, 0, 0, 10),
+            BpfInsn::new(BPF_LDX_IMM, 0, 0, 20),
+            BpfInsn::new(BPF_ADD_X, 0, 0, 0),
+            BpfInsn::new(BPF_RET_A, 0, 0, 0),
+        ];
+
+
+        let mut converter = Converter::new();
+        let ir = converter.convert(&insns);
+        let r = converter.jit_compile();
+        assert!(ir.is_ok());
+        assert!(r.is_ok());
+        unsafe {
+            assert_eq!(converter.run_jit_func(&mut []), 30);
+        }
     }
 }
