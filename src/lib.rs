@@ -16,7 +16,7 @@ macro_rules! cstr {
     () => (b"\0".as_ptr() as *const libc::c_char);
 }
 
-type Func = extern "C" fn(*mut i8) -> i32;
+type Func = extern "C" fn(*mut u8) -> i32;
 
 pub struct Converter {
     context: LLVMContextRef,
@@ -178,6 +178,7 @@ impl Converter {
         self.verify_module(self.module)
     }
 
+    // for debug
     pub fn dump_module(&self) {
         unsafe {
             llvm::core::LLVMDumpModule(self.module);
@@ -258,7 +259,7 @@ impl Converter {
                     llvm::core::LLVMBuildRet(self.builder, a);
                 },
                 BPF_K => unsafe {
-                    llvm::core::LLVMBuildRet(self.builder, x);
+                    llvm::core::LLVMBuildRet(self.builder, k);
                 },
                 _ => panic!("InvalidRval"),
             },
@@ -364,7 +365,7 @@ impl Converter {
                 }
             } else {
                 let jt_bb = bbs[insn.jt as usize + idx + 1];
-                let jf_bb = bbs[insn.jt as usize + idx + 1];
+                let jf_bb = bbs[insn.jf as usize + idx + 1];
 
                 let src = match bpf_src(insn.code) {
                     BPF_K => k,
@@ -484,8 +485,8 @@ impl Converter {
         }
     }
 
-    pub unsafe fn run_jit_func(&self, data: &mut [i8]) -> i32 {
-        self.jit_func.expect("compile program first")(data.as_ptr() as *mut i8)
+    pub unsafe fn run_jit_func(&self, data: &[u8]) -> i32 {
+        self.jit_func.expect("compile program first")(data.as_ptr() as *mut u8)
     }
 }
 
@@ -507,6 +508,7 @@ impl Drop for Converter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cbpf::interpreter::{Interpreter, Simple};
 
     fn convert(insns: &[BpfInsn]) -> Result<String, String> {
         let mut converter = Converter::new();
@@ -584,10 +586,262 @@ mod tests {
         let mut converter = Converter::new();
         let ir = converter.convert(&insns);
         let r = converter.jit_compile();
+        converter.dump_module();
         assert!(ir.is_ok());
         assert!(r.is_ok());
         unsafe {
             assert_eq!(converter.run_jit_func(&mut []), 30);
         }
     }
+
+    #[test]
+    fn test() {
+        // ld [12]; jne 0806, drop; ret -1; drop: ret 0;
+        let insns = [
+            BpfInsn::new(BPF_LD_H_ABS, 0, 0, 12),
+            BpfInsn::new(BPF_JEQ_K, 0, 1, 0x0806),
+            BpfInsn::new(BPF_RET_K, 0, 0, u32::max_value()),
+            BpfInsn::new(BPF_RET_K, 0, 0, 0),
+        ];
+
+        // arp request packet
+        let data: &[u8] = &[
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0xf4,
+            0x0f,
+            0x24,
+            0xff,
+            0xff,
+            0xff,
+            0x08,
+            0x06,
+            0x00,
+            0x01,
+            0x08,
+            0x00,
+            0x06,
+            0x04,
+            0x00,
+            0x01,
+            0xf4,
+            0x0f,
+            0x24,
+            0x2d,
+            0x94,
+            0x69,
+            0xc0,
+            0xa8,
+            0x00,
+            0x2a,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0xc0,
+            0xa8,
+            0x00,
+            0x32,
+        ];
+
+        let mut converter = Converter::new();
+        let ir = converter.convert(&insns);
+        let r = converter.jit_compile();
+        converter.dump_module();
+        assert!(ir.is_ok());
+        assert!(r.is_ok());
+        unsafe {
+            assert_eq!(converter.run_jit_func(&data) as u32, u32::max_value());
+        }
+    }
+
+    #[test]
+    fn test2() {
+        let insns = [
+            BpfInsn::new(BPF_LDX_B_MSH, 0, 0, 3),
+            BpfInsn::new(BPF_MISC_TXA, 0, 0, 0),
+            BpfInsn::new(BPF_RET_A, 0, 0, 0),
+        ];
+
+        let data: &[u8] = &[0x11, 0x12, 0x13, 0x14];
+        let cr = { Simple::run(&insns, &data).unwrap() };
+        let mut converter = Converter::new();
+        let ir = converter.convert(&insns);
+        let r = converter.jit_compile();
+        converter.dump_module();
+        assert!(ir.is_ok());
+        assert!(r.is_ok());
+        unsafe {
+            assert_eq!(converter.run_jit_func(&data) as u32, cr);
+        }
+    }
+
+    #[test]
+    fn test3() {
+        let insns = [
+            BpfInsn::new(BPF_JA, 0, 0, 1),
+            BpfInsn::new(BPF_MISC_TXA, 0, 0, 0),
+            BpfInsn::new(BPF_LD_IMM, 0, 0, 10),
+            BpfInsn::new(BPF_JEQ_K, 0, 3, 20),
+            BpfInsn::new(BPF_MISC_TXA, 0, 0, 0),
+            BpfInsn::new(BPF_MISC_TXA, 0, 0, 0),
+            BpfInsn::new(BPF_RET_K, 0, 0, 1),
+            BpfInsn::new(BPF_JGE_K, 0, 1, 10),
+            BpfInsn::new(BPF_RET_K, 0, 0, 2),
+            BpfInsn::new(BPF_RET_K, 0, 0, 3),
+        ];
+
+        let data: &[u8] = &[0x11, 0x12, 0x13, 0x14];
+        let cr = { Simple::run(&insns, &data).unwrap() };
+        let mut converter = Converter::new();
+        let ir = converter.convert(&insns);
+        let r = converter.jit_compile();
+        converter.dump_module();
+        assert!(ir.is_ok());
+        assert!(r.is_ok());
+        unsafe {
+            assert_eq!(converter.run_jit_func(&data) as u32, cr);
+        }
+    }
+
+    #[test]
+    fn test4() {
+        let insns = [
+            BpfInsn::new(BPF_LD_IMM, 0, 0, 10),
+            BpfInsn::new(BPF_ST, 0, 0, 1),
+            BpfInsn::new(BPF_LDX_MEM, 0, 0, 1),
+            BpfInsn::new(BPF_MISC_TXA, 0, 0, 0),
+            BpfInsn::new(BPF_RET_A, 0, 0, 0),
+        ];
+
+        let data: &[u8] = &[0x11, 0x12, 0x13, 0x14];
+        let cr = { Simple::run(&insns, &data).unwrap() };
+        let mut converter = Converter::new();
+        let ir = converter.convert(&insns);
+        let r = converter.jit_compile();
+        converter.dump_module();
+        assert!(ir.is_ok());
+        assert!(r.is_ok());
+        unsafe {
+            assert_eq!(converter.run_jit_func(&data) as u32, cr);
+        }
+    }
+
+    #[test]
+    fn test5() {
+        let insns = [
+            BpfInsn::new(BPF_LDX_B_MSH, 0, 0, 0),
+            BpfInsn::new(BPF_LD_W_IND, 0, 0, 1),
+            BpfInsn::new(BPF_RET_A, 0, 0, 0),
+        ];
+        let data: &[u8] = &[
+            0x2,
+            0x1,
+            0x2,
+            0x3,
+            0x4,
+            0x5,
+            0x6,
+            0x7,
+            0x8,
+            0x12,
+            0x34,
+            0x56,
+            0x78,
+            0x9a,
+            0xbc,
+            0xde,
+        ];
+        let cr = { Simple::run(&insns, &data).unwrap() };
+        let mut converter = Converter::new();
+        let ir = converter.convert(&insns);
+        let r = converter.jit_compile();
+        converter.dump_module();
+        assert!(ir.is_ok());
+        assert!(r.is_ok());
+        unsafe {
+            assert_eq!(converter.run_jit_func(&data) as u32, cr);
+        }
+    }
+
+    #[test]
+    fn test6() {
+        let insns = [
+            BpfInsn::new(BPF_LDX_B_MSH, 0, 0, 0),
+            BpfInsn::new(BPF_LD_H_IND, 0, 0, 1),
+            BpfInsn::new(BPF_RET_A, 0, 0, 0),
+        ];
+        let data: &[u8] = &[
+            0x2,
+            0x1,
+            0x2,
+            0x3,
+            0x4,
+            0x5,
+            0x6,
+            0x7,
+            0x8,
+            0x12,
+            0x34,
+            0x56,
+            0x78,
+            0x9a,
+            0xbc,
+            0xde,
+        ];
+        let cr = { Simple::run(&insns, &data).unwrap() };
+        let mut converter = Converter::new();
+        let ir = converter.convert(&insns);
+        let r = converter.jit_compile();
+        converter.dump_module();
+        assert!(ir.is_ok());
+        assert!(r.is_ok());
+        unsafe {
+            assert_eq!(converter.run_jit_func(&data) as u32, cr);
+        }
+    }
+
+    #[test]
+    fn test7() {
+        let insns = [
+            BpfInsn::new(BPF_LDX_B_MSH, 0, 0, 0),
+            BpfInsn::new(BPF_LD_B_IND, 0, 0, 1),
+            BpfInsn::new(BPF_RET_A, 0, 0, 0),
+        ];
+        let data: &[u8] = &[
+            0x2,
+            0x1,
+            0x2,
+            0x3,
+            0x4,
+            0x5,
+            0x6,
+            0x7,
+            0x8,
+            0x12,
+            0x34,
+            0x56,
+            0x78,
+            0x9a,
+            0xbc,
+            0xde,
+        ];
+        let cr = { Simple::run(&insns, &data).unwrap() };
+        let mut converter = Converter::new();
+        let ir = converter.convert(&insns);
+        let r = converter.jit_compile();
+        converter.dump_module();
+        assert!(ir.is_ok());
+        assert!(r.is_ok());
+        unsafe {
+            assert_eq!(converter.run_jit_func(&data) as u32, cr);
+        }
+    }
+
 }

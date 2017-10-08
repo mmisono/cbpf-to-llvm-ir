@@ -23,20 +23,6 @@ define i32 @be(i32) #0 {
 }
 
 ; Function Attrs: noinline nounwind optnone ssp uwtable
-define i32 @be16(i32) #0 {
-  %2 = alloca i32, align 4
-  store i32 %0, i32* %2, align 4
-  %3 = load i32, i32* %2, align 4
-  %4 = and i32 %3, 255
-  %5 = shl i32 %4, 8
-  %6 = load i32, i32* %2, align 4
-  %7 = ashr i32 %6, 8
-  %8 = and i32 %7, 255
-  %9 = or i32 %5, %8
-  ret i32 %9
-}
-
-; Function Attrs: noinline nounwind optnone ssp uwtable
 define i32 @ldw(i8*, i32) #0 {
   %3 = alloca i8*, align 8
   %4 = alloca i32, align 4
@@ -79,8 +65,7 @@ define i32 @ldh(i8*, i32) #0 {
   %20 = or i32 %12, %19
   store i32 %20, i32* %5, align 4
   %21 = load i32, i32* %5, align 4
-  %22 = call i32 @be16(i32 %21)
-  ret i32 %22
+  ret i32 %21
 }
 
 ; Function Attrs: noinline nounwind optnone ssp uwtable

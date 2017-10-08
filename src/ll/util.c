@@ -4,10 +4,6 @@ int be(int x){
            (((x >> 16) & 0xff) << 8) | ((x >> 24) & 0xff);
 }
 
-int be16(int x){
-   return  ((x & 0xff) << 8) | ((x >> 8) & 0xff);
-}
-
 int ldw(unsigned char* x, int offset){
     int v = *(int *)(x+offset);
     return be(v);
@@ -15,7 +11,7 @@ int ldw(unsigned char* x, int offset){
 
 int ldh(unsigned char* x, int offset){
     int v = ((*(x+offset)) << 8) | (*(x+offset+1));
-    return be16(v);
+    return v;
 }
 
 int ldb(unsigned char* x, int offset){
