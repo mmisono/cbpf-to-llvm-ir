@@ -9,14 +9,17 @@ libc = "*"
 
 cbpf = {git = "https://github.com/mmisono/rust-cbpf"}
 
-#error-chain = {version = "0.11.0", optional = true}
-#structopt = {version = "0.1.0", optional = true}
+error-chain = {version = "0.11.0", optional = true}
+structopt = {version = "0.1.0", optional = true}
 structopt-derive = {version = "0.1.0", optional = true}
 # use offline-bpf branch to compile cBPF program
 # see: https://github.com/ebfull/pcap/pull/56
-#pcap = {git = "https://github.com/polachok/pcap", branch="offline-bpf", optional = true}
+pcap = {git = "https://github.com/polachok/pcap", branch="offline-bpf", optional = true}
 
-#[[bin]]
-#name = "cbpf2ir"
-#path = "src/bin/cbpf2ir.rs"
-#required-features = ["pcap", "structopt", "structopt-derive", "error-chain"]
+[[bin]]
+name = "cbpf2ir"
+path = "src/bin/cbpf2ir.rs"
+required-features = ["pcap", "structopt", "structopt-derive", "error-chain"]
+
+[features]
+default = ["pcap", "structopt", "structopt-derive", "error-chain"]
