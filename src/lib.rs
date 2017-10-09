@@ -209,7 +209,7 @@ impl Converter {
         bbs
     }
 
-    pub fn convert(&mut self, insns: &[BpfInsn]) -> Result<String, String> {
+    pub fn convert(&mut self, insns: &[BpfInsn], optimization: bool) -> Result<String, String> {
         // setup
         self.create_main();
         self.link_util();
@@ -219,6 +219,10 @@ impl Converter {
         // convert each instruction
         for (i, insn) in insns.iter().enumerate() {
             self.convert_insn(*insn, &bbs, i);
+        }
+
+        if optimization {
+            self.optimize();
         }
 
         if self.verify_main() {
@@ -450,7 +454,76 @@ impl Converter {
     }
 
     // optimization
-    // based on optimization code of https://bitbucket.org/tari/merthc
+    fn optimize(&mut self) {
+        self.optimize_module();
+        self.optimize_lto();
+    }
+
+    // based on merthc (https://bitbucket.org/tari/merthc) codes
+    fn optimize_lto(&self) {
+        use llvm::transforms::pass_manager_builder::*;
+        unsafe {
+            // mark all functions but main (and llvm intrinsics) as private to remove
+            for k in self.functions.keys() {
+                if k != "main" {
+                    llvm::core::LLVMSetLinkage(
+                        self.get_function(k),
+                        llvm::LLVMLinkage::LLVMPrivateLinkage,
+                    );
+                }
+            }
+        }
+
+        unsafe {
+            let pm = llvm::core::LLVMCreatePassManager();
+            let pmb = LLVMPassManagerBuilderCreate();
+            LLVMPassManagerBuilderPopulateLTOPassManager(
+                pmb,
+                pm,
+                1, // Internalize
+                1,
+            ); // Run inliner
+            LLVMPassManagerBuilderDispose(pmb);
+
+            llvm::core::LLVMRunPassManager(pm, self.module);
+            llvm::core::LLVMDisposePassManager(pm);
+        }
+    }
+
+    fn optimize_module(&self) {
+        use llvm::transforms::pass_manager_builder::*;
+
+        unsafe {
+            // Per clang and rustc, we want to use both kinds.
+            let fpm = llvm::core::LLVMCreateFunctionPassManagerForModule(self.module);
+            let mpm = llvm::core::LLVMCreatePassManager();
+
+            // Populate the pass managers with passes
+            let pmb = LLVMPassManagerBuilderCreate();
+            LLVMPassManagerBuilderSetOptLevel(pmb, 2);
+            // Magic threshold from Clang for -O2
+            LLVMPassManagerBuilderUseInlinerWithThreshold(pmb, 1024);
+            LLVMPassManagerBuilderPopulateModulePassManager(pmb, mpm);
+            LLVMPassManagerBuilderPopulateFunctionPassManager(pmb, fpm);
+            LLVMPassManagerBuilderDispose(pmb);
+
+            // Iterate over functions, running the FPM over each
+            llvm::core::LLVMInitializeFunctionPassManager(fpm);
+            let mut func = llvm::core::LLVMGetFirstFunction(self.module);
+            while func != ptr::null_mut() {
+                llvm::core::LLVMRunFunctionPassManager(fpm, func);
+                func = llvm::core::LLVMGetNextFunction(func);
+            }
+            llvm::core::LLVMFinalizeFunctionPassManager(fpm);
+
+            // Run the MPM over the module
+            llvm::core::LLVMRunPassManager(mpm, self.module);
+
+            // Clean up managers
+            llvm::core::LLVMDisposePassManager(fpm);
+            llvm::core::LLVMDisposePassManager(mpm);
+        }
+    }
 
     // compile program
     pub fn jit_compile(&mut self) -> Result<(), String> {
@@ -512,9 +585,26 @@ mod tests {
 
     fn convert(insns: &[BpfInsn]) -> Result<String, String> {
         let mut converter = Converter::new();
-        let ir = converter.convert(insns);
+        let ir = converter.convert(insns, false);
         converter.dump_module();
         ir
+    }
+
+    fn _check(insns: &[BpfInsn], data: &[u8], true_value: u32, optimization: bool) {
+        let mut converter = Converter::new();
+        let ir = converter.convert(&insns, optimization);
+        let r = converter.jit_compile();
+        converter.dump_module();
+        assert!(ir.is_ok());
+        assert!(r.is_ok());
+        unsafe {
+            assert_eq!(converter.run_jit_func(&data) as u32, true_value);
+        }
+    }
+
+    fn check(insns: &[BpfInsn], data: &[u8], true_value: u32) {
+        _check(&insns, &data, true_value, false);
+        _check(&insns, &data, true_value, true);
     }
 
     #[test]
@@ -582,16 +672,7 @@ mod tests {
             BpfInsn::new(BPF_RET_A, 0, 0, 0),
         ];
 
-
-        let mut converter = Converter::new();
-        let ir = converter.convert(&insns);
-        let r = converter.jit_compile();
-        converter.dump_module();
-        assert!(ir.is_ok());
-        assert!(r.is_ok());
-        unsafe {
-            assert_eq!(converter.run_jit_func(&mut []), 30);
-        }
+        check(&insns, &[], 30);
     }
 
     #[test]
@@ -650,15 +731,7 @@ mod tests {
             0x32,
         ];
 
-        let mut converter = Converter::new();
-        let ir = converter.convert(&insns);
-        let r = converter.jit_compile();
-        converter.dump_module();
-        assert!(ir.is_ok());
-        assert!(r.is_ok());
-        unsafe {
-            assert_eq!(converter.run_jit_func(&data) as u32, u32::max_value());
-        }
+        check(&insns, &data, u32::max_value());
     }
 
     #[test]
@@ -671,15 +744,7 @@ mod tests {
 
         let data: &[u8] = &[0x11, 0x12, 0x13, 0x14];
         let cr = { Simple::run(&insns, &data).unwrap() };
-        let mut converter = Converter::new();
-        let ir = converter.convert(&insns);
-        let r = converter.jit_compile();
-        converter.dump_module();
-        assert!(ir.is_ok());
-        assert!(r.is_ok());
-        unsafe {
-            assert_eq!(converter.run_jit_func(&data) as u32, cr);
-        }
+        check(&insns, &data, cr);
     }
 
     #[test]
@@ -699,15 +764,7 @@ mod tests {
 
         let data: &[u8] = &[0x11, 0x12, 0x13, 0x14];
         let cr = { Simple::run(&insns, &data).unwrap() };
-        let mut converter = Converter::new();
-        let ir = converter.convert(&insns);
-        let r = converter.jit_compile();
-        converter.dump_module();
-        assert!(ir.is_ok());
-        assert!(r.is_ok());
-        unsafe {
-            assert_eq!(converter.run_jit_func(&data) as u32, cr);
-        }
+        check(&insns, &data, cr);
     }
 
     #[test]
@@ -722,15 +779,7 @@ mod tests {
 
         let data: &[u8] = &[0x11, 0x12, 0x13, 0x14];
         let cr = { Simple::run(&insns, &data).unwrap() };
-        let mut converter = Converter::new();
-        let ir = converter.convert(&insns);
-        let r = converter.jit_compile();
-        converter.dump_module();
-        assert!(ir.is_ok());
-        assert!(r.is_ok());
-        unsafe {
-            assert_eq!(converter.run_jit_func(&data) as u32, cr);
-        }
+        check(&insns, &data, cr);
     }
 
     #[test]
@@ -759,15 +808,7 @@ mod tests {
             0xde,
         ];
         let cr = { Simple::run(&insns, &data).unwrap() };
-        let mut converter = Converter::new();
-        let ir = converter.convert(&insns);
-        let r = converter.jit_compile();
-        converter.dump_module();
-        assert!(ir.is_ok());
-        assert!(r.is_ok());
-        unsafe {
-            assert_eq!(converter.run_jit_func(&data) as u32, cr);
-        }
+        check(&insns, &data, cr);
     }
 
     #[test]
@@ -796,15 +837,7 @@ mod tests {
             0xde,
         ];
         let cr = { Simple::run(&insns, &data).unwrap() };
-        let mut converter = Converter::new();
-        let ir = converter.convert(&insns);
-        let r = converter.jit_compile();
-        converter.dump_module();
-        assert!(ir.is_ok());
-        assert!(r.is_ok());
-        unsafe {
-            assert_eq!(converter.run_jit_func(&data) as u32, cr);
-        }
+        check(&insns, &data, cr);
     }
 
     #[test]
@@ -833,15 +866,7 @@ mod tests {
             0xde,
         ];
         let cr = { Simple::run(&insns, &data).unwrap() };
-        let mut converter = Converter::new();
-        let ir = converter.convert(&insns);
-        let r = converter.jit_compile();
-        converter.dump_module();
-        assert!(ir.is_ok());
-        assert!(r.is_ok());
-        unsafe {
-            assert_eq!(converter.run_jit_func(&data) as u32, cr);
-        }
+        check(&insns, &data, cr);
     }
 
 }

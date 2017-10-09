@@ -27,6 +27,7 @@ use errors::*;
 #[derive(StructOpt, Debug)]
 #[structopt(name = "cbpf2ir", about = "Convert cBPF program to LLVM IR from libpcap's expression")]
 struct Opt {
+    #[structopt(short = "n", long = "noopt", help = "no optimization")] noopt: bool,
     #[structopt(short = "d", long = "debug", help = "Activate debug mode")] debug: bool,
     #[structopt(short = "o", long = "outfile", help = "Output file")] outfile: String,
     #[structopt(short = "l", long = "linktype", /* default is ethernet */
@@ -44,7 +45,7 @@ fn run() -> Result<()> {
     let insns: &[BpfInsn] = unsafe { std::mem::transmute(bpf_prog.get_instructions()) };
 
     let mut converter = Converter::new();
-    let ir = converter.convert(insns);
+    let ir = converter.convert(insns, !args.noopt);
     if ir.is_err() {
         return Err(format!("{}", ir.err().unwrap()).into());
     }
